@@ -66,6 +66,7 @@
 
 #include "terminal.h"
 #include "lib.h"
+#include <Python.h>
 
 /* for hardware timestamps - since Linux 2.6.30 */
 #ifndef SO_TIMESTAMPING
@@ -120,6 +121,8 @@ static const char extra_m_info[4][4] = { "- -", "B -", "- E", "B E" };
 extern int optind, opterr, optopt;
 
 static volatile int running = 1;
+static volatile int frame_ctr = 0;
+
 
 static void print_usage(char *prg)
 {
@@ -171,6 +174,7 @@ static void print_usage(char *prg)
 static void sigterm(int signo)
 {
 	running = 0;
+	printf("%d frame received \n", frame_ctr);
 }
 
 static int idx2dindex(int ifidx, int socket)
@@ -277,7 +281,7 @@ static inline void print_timestamp(const char timestamp, const struct timeval *t
 	printf("%s", buffer);
 }
 
-int main(int argc, char **argv)
+int loop(char **argv, int total_devices, char **filters, int total_filters)
 {
 	int fd_epoll;
 	struct epoll_event events_pending[MAXSOCK];
@@ -290,7 +294,7 @@ int main(int argc, char **argv)
 	unsigned char down_causes_exit = 1;
 	unsigned char dropmonitor = 0;
 	unsigned char extra_msg_info = 0;
-	unsigned char silent = SILENT_INI;
+	unsigned char silent = SILENT_ON;
 	unsigned char silentani = 0;
 	unsigned char color = 0;
 	unsigned char view = 0;
@@ -298,10 +302,10 @@ int main(int argc, char **argv)
 	unsigned char logfrmt = 0;
 	int count = 0;
 	int rcvbuf_size = 0;
-	int opt, num_events;
-	int currmax, numfilter;
+	int num_events;
 	int join_filter;
 	char *ptr, *nptr;
+	int numfilter;
 	struct sockaddr_can addr;
 	char ctrlmsg[CMSG_SPACE(sizeof(struct timeval) + 3 * sizeof(struct timespec) + sizeof(__u32))];
 	struct iovec iov;
@@ -324,135 +328,9 @@ int main(int argc, char **argv)
 	last_tv.tv_sec = 0;
 	last_tv.tv_usec = 0;
 
-	while ((opt = getopt(argc, argv, "t:HciaSs:lDdxLf:n:r:he8T:?")) != -1) {
-		switch (opt) {
-		case 't':
-			timestamp = optarg[0];
-			logtimestamp = optarg[0];
-			if ((timestamp != 'a') && (timestamp != 'A') &&
-			    (timestamp != 'd') && (timestamp != 'z')) {
-				fprintf(stderr, "%s: unknown timestamp mode '%c' - ignored\n",
-					basename(argv[0]), optarg[0]);
-				timestamp = 0;
-			}
-			if ((logtimestamp != 'a') && (logtimestamp != 'z')) {
-				logtimestamp = 'a';
-			}
-			break;
 
-		case 'H':
-			hwtimestamp = 1;
-			break;
 
-		case 'c':
-			color++;
-			break;
-
-		case 'i':
-			view |= CANLIB_VIEW_BINARY;
-			break;
-
-		case 'a':
-			view |= CANLIB_VIEW_ASCII;
-			break;
-
-		case 'S':
-			view |= CANLIB_VIEW_SWAP;
-			break;
-
-		case 'e':
-			view |= CANLIB_VIEW_ERROR;
-			break;
-
-		case '8':
-			view |= CANLIB_VIEW_LEN8_DLC;
-			break;
-
-		case 's':
-			silent = atoi(optarg);
-			if (silent > SILENT_ON) {
-				print_usage(basename(argv[0]));
-				exit(1);
-			}
-			break;
-
-		case 'l':
-			log = 1;
-			break;
-
-		case 'D':
-			down_causes_exit = 0;
-			break;
-
-		case 'd':
-			dropmonitor = 1;
-			break;
-
-		case 'x':
-			extra_msg_info = 1;
-			break;
-
-		case 'L':
-			logfrmt = 1;
-			break;
-
-		case 'f':
-			logname = optarg;
-			log = 1;
-			break;
-
-		case 'n':
-			count = atoi(optarg);
-			if (count < 1) {
-				print_usage(basename(argv[0]));
-				exit(1);
-			}
-			break;
-
-		case 'r':
-			rcvbuf_size = atoi(optarg);
-			if (rcvbuf_size < 1) {
-				print_usage(basename(argv[0]));
-				exit(1);
-			}
-			break;
-
-		case 'T':
-			errno = 0;
-			timeout_ms = strtol(optarg, NULL, 0);
-			if (errno != 0) {
-				print_usage(basename(argv[0]));
-				exit(1);
-			}
-			break;
-		default:
-			print_usage(basename(argv[0]));
-			exit(1);
-			break;
-		}
-	}
-
-	if (optind == argc) {
-		print_usage(basename(argv[0]));
-		exit(0);
-	}
-
-	if (logfrmt && view) {
-		fprintf(stderr, "Log file format selected: Please disable ASCII/BINARY/SWAP/RAWDLC options!\n");
-		exit(0);
-	}
-
-	if (silent == SILENT_INI) {
-		if (log) {
-			fprintf(stderr, "Disabled standard output while logging.\n");
-			silent = SILENT_ON; /* disable output on stdout */
-		} else
-			silent = SILENT_OFF; /* default output */
-	}
-
-	currmax = argc - optind; /* find real number of CAN devices */
-
-	if (currmax > MAXSOCK) {
+	if (total_devices > MAXSOCK) {
 		fprintf(stderr, "More than %d CAN devices given on commandline!\n", MAXSOCK);
 		return 1;
 	}
@@ -463,14 +341,10 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	for (i = 0; i < currmax; i++) {
+	for (i = 0; i < total_devices; i++) {
 		struct if_info* obj = &sock_info[i];
-		ptr = argv[optind+i];
+		ptr = argv[i];
 		nptr = strchr(ptr, ',');
-
-#ifdef DEBUG
-		printf("open %d '%s'.\n", i, ptr);
-#endif
 
 		obj->s = socket(PF_CAN, SOCK_RAW, CAN_RAW);
 		if (obj->s < 0) {
@@ -504,47 +378,29 @@ int main(int argc, char **argv)
 		memset(&ifr.ifr_name, 0, sizeof(ifr.ifr_name));
 		strncpy(ifr.ifr_name, ptr, nbytes);
 
-#ifdef DEBUG
-		printf("using interface name '%s'.\n", ifr.ifr_name);
-#endif
 
 		if (strcmp(ANYDEV, ifr.ifr_name) != 0) {
 			if (ioctl(obj->s, SIOCGIFINDEX, &ifr) < 0) {
 				perror("SIOCGIFINDEX");
 				exit(1);
-			}
-			addr.can_ifindex = ifr.ifr_ifindex;
+			}	
+
 		} else
 			addr.can_ifindex = 0; /* any can interface */
 
-		if (nptr) {
-
-			/* found a ',' after the interface name => check for filters */
-
-			/* determine number of filters to alloc the filter space */
-			numfilter = 0;
-			ptr = nptr;
-			while (ptr) {
-				numfilter++;
-				ptr++; /* hop behind the ',' */
-				ptr = strchr(ptr, ','); /* exit condition */
-			}
-
-			rfilter = malloc(sizeof(struct can_filter) * numfilter);
+		if (total_filters > 0) {
+			rfilter = malloc(sizeof(struct can_filter) * total_filters);
 			if (!rfilter) {
 				fprintf(stderr, "Failed to create filter space!\n");
 				return 1;
 			}
 
-			numfilter = 0;
 			err_mask = 0;
 			join_filter = 0;
+			numfilter = 0;
+			for (int i =0; i < total_filters; i++) {
 
-			while (nptr) {
-
-				ptr = nptr + 1; /* hop behind the ',' */
-				nptr = strchr(ptr, ','); /* update exit condition */
-
+				ptr = filters[i]; 
 				if (sscanf(ptr, "%x:%x",
 					   &rfilter[numfilter].can_id,
 					   &rfilter[numfilter].can_mask) == 2) {
@@ -701,13 +557,13 @@ int main(int argc, char **argv)
 	msg.msg_control = &ctrlmsg;
 
 	while (running) {
-		num_events = epoll_wait(fd_epoll, events_pending, currmax, timeout_ms);
+		num_events = epoll_wait(fd_epoll, events_pending, total_devices, timeout_ms);
 		if (num_events == -1) {
 			if (errno != EINTR)
 				running = 0;
 			continue;
 		}
-
+		frame_ctr += num_events;
 		for (i = 0; i < num_events; i++) {  /* check waiting CAN RAW sockets */
 			struct if_info* obj = events_pending[i].data.ptr;
 			int idx;
@@ -851,7 +707,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	for (i = 0; i < currmax; i++)
+	for (i = 0; i < total_devices; i++)
 		close(sock_info[i].s);
 
 	close(fd_epoll);
@@ -859,5 +715,14 @@ int main(int argc, char **argv)
 	if (log)
 		fclose(logfile);
 
+	return 0;	
+}
+
+int main()
+{ 
+	char *devices[1];
+	char *filters[0] = {};
+	devices[0] = "vcan0";
+	loop(devices, 1, filters, 0);
 	return 0;
 }
