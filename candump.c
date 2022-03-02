@@ -177,6 +177,7 @@ static void sigterm(int signo)
 	printf("%d frame received \n", frame_ctr);
 }
 
+
 static int idx2dindex(int ifidx, int socket)
 {
 
@@ -726,3 +727,49 @@ int main()
 	loop(devices, 1, filters, 0);
 	return 0;
 }
+
+static void call_loop()
+{ 
+	char *devices[1];
+	char *filters[0] = {};
+	devices[0] = "vcan0";
+	loop(devices, 1, filters, 0);
+}
+
+
+static PyObject *method_fputs(PyObject *self, PyObject *args) {
+
+    char *str, *filename;
+    int bytes_copied = -1;
+
+    /* Parse arguments */
+    if(!PyArg_ParseTuple(args, "ss", &str, &filename)) {
+        return NULL;
+    }
+
+
+    FILE *fp = fopen(filename, "w");
+    bytes_copied = fputs(str, fp);
+    fclose(fp);
+    return PyLong_FromLong(bytes_copied);
+}
+
+static PyMethodDef FputsMethods[] = {
+    {"fputs", method_fputs, METH_VARARGS, "Python interface for candump C library function"},
+    {NULL, NULL, 0, NULL}
+};
+
+
+static struct PyModuleDef candumpmodule = {
+    PyModuleDef_HEAD_INIT,
+    "candump",
+    "Python interface for the fputs C library function",
+    -1,
+    FputsMethods
+};
+
+/* comment to compile with gcc */
+PyMODINIT_FUNC PyInit_candump(void) {
+    return PyModule_Create(&candumpmodule);
+}
+
