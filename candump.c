@@ -98,6 +98,8 @@
 #define MAGENTA (ATTBOLD FGMAGENTA)
 #define CYAN (ATTBOLD FGCYAN)
 
+#define FRAME_BUFFER_SIZE 256 // WARNING: should be a power of 2
+
 static const char col_on[MAXCOL][19] = { BLUE, RED, GREEN, BOLD, MAGENTA, CYAN };
 static const char col_off[] = ATTRESET;
 
@@ -122,8 +124,16 @@ extern int optind, opterr, optopt;
 
 static volatile int running = 1;
 static volatile int frame_ctr = 0;
+static int buffer_ptr = 0;
 
-
+struct canframe
+{
+	long timestamp;
+	uint8_t len; 
+	uint32_t arbitration_id;
+	uint64_t data;
+};
+struct canframe frame_buffer[FRAME_BUFFER_SIZE];
 static void print_usage(char *prg)
 {
 	fprintf(stderr, "%s - dump CAN bus traffic.\n", prg);
@@ -648,6 +658,13 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 				else
 					extra_info = " R";
 			}
+			/* ----------------------------------- */
+			/* registering CAN frame in buffer */
+			frame_buffer[buffer_ptr].arbitration_id = (uint32_t) frame.can_id;
+			frame_buffer[buffer_ptr].len = (uint8_t) frame.can_id;
+			frame_buffer[buffer_ptr].data = (uint64_t) frame.data;
+			frame_buffer[buffer_ptr].timestamp = 0;
+			buffer_ptr = (buffer_ptr + 1) % FRAME_BUFFER_SIZE;
 
 			if (log) {
 				char buf[CL_CFSZ]; /* max length */
@@ -728,14 +745,28 @@ int main()
 	return 0;
 }
 
-static void call_loop()
+static PyObject *call_loop()
 { 
 	char *devices[1];
 	char *filters[0] = {};
 	devices[0] = "vcan0";
+	printf("%s\n", devices[0]);
 	loop(devices, 1, filters, 0);
+	Py_RETURN_NONE;
 }
 
+static PyObject *get_frame_from_buffer()
+{
+	PyObject *frame = Py_BuildValue("(h,c,l,l)", frame_buffer[buffer_ptr].arbitration_id, frame_buffer[buffer_ptr].len, frame_buffer[buffer_ptr].data, frame_buffer[buffer_ptr].timestamp);
+	buffer_ptr--;
+	return frame;
+	// for (int i =0; i < buffer_ptr; i++)
+	// {
+	// 	PyObject *frame = Py_BuildValue("(i,i,i,i)", frame_buffer[i].arbitration_id, frame_buffer[i].len, frame_buffer[i].data, frame_buffer[i].timestamp);
+	// 	return frame;
+	// }
+	// Py_RETURN_NONE;
+}
 
 static PyObject *method_fputs(PyObject *self, PyObject *args) {
 
@@ -754,8 +785,11 @@ static PyObject *method_fputs(PyObject *self, PyObject *args) {
     return PyLong_FromLong(bytes_copied);
 }
 
+
 static PyMethodDef FputsMethods[] = {
     {"fputs", method_fputs, METH_VARARGS, "Python interface for candump C library function"},
+    {"loop", call_loop, METH_VARARGS, "Python interface for candump C library function"},
+    {"recv", get_frame_from_buffer, METH_VARARGS, "Extracts last message from buffer"},
     {NULL, NULL, 0, NULL}
 };
 
