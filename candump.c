@@ -66,6 +66,10 @@
 
 #include "terminal.h"
 #include "lib.h"
+/* -------------------------------------------------------------------------- 
+	defining PY_SSIZE_T_CLEAN is required before including Python.h
+*/
+#define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
 /* for hardware timestamps - since Linux 2.6.30 */
@@ -134,7 +138,7 @@ struct canframe
 	double timestamp;
 	uint8_t len; 
 	uint32_t arbitration_id;
-	uint64_t data;
+	char data[8]; /* appending NULL byte as we will pass this to Python as a string - this is simpler as we cannot specify byte array length */
 };
 struct canframe frame_buffer[FRAME_BUFFER_SIZE];
 static void print_usage(char *prg)
@@ -192,8 +196,8 @@ static void sigterm(int signo)
 }
 
 
-
-static int idx2dindex(int ifidx, int socket)
+/* disabling inlining as both GCC and Clang mess up the inlining, leading the code to fail when called in a Python thread */
+static int __attribute__ ((noinline)) idx2dindex(int ifidx, int socket)
 {
 
 	int i;
@@ -302,6 +306,27 @@ static inline void print_timestamp(const char timestamp, const struct timeval *t
 	printf("%s", buffer);
 }
 
+/*------------------------------------------------------------------*/
+void reverse_endian(uint8_t *src, uint8_t *dst, const int len)
+{
+	int i;
+	for (i = 0; i < len; i++)
+		dst[i] = src[len - i - 1];
+}
+
+void init_buffer()
+{
+	int i;
+	for (i = 0; i < FRAME_BUFFER_SIZE; i++)
+	{
+		frame_buffer[i].timestamp = 0;
+		frame_buffer[i].len = 0;
+		frame_buffer[i].arbitration_id = 0;
+		memset(&frame_buffer[i].data, 0, sizeof(frame_buffer[i].data));
+		// frame_buffer[i].data[8] = '\0';
+	}
+}
+
 int loop(char **argv, int total_devices, char **filters, int total_filters)
 {
 	int fd_epoll;
@@ -346,6 +371,8 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 	signal(SIGHUP, sigterm);
 	signal(SIGINT, sigterm);
 
+	/* --------------------- */
+	init_buffer();
 	last_tv.tv_sec = 0;
 	last_tv.tv_usec = 0;
 
@@ -638,6 +665,7 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 					 */
 					tv.tv_sec = stamp[2].tv_sec;
 					tv.tv_usec = stamp[2].tv_nsec/1000;
+					frame_buffer[buffer_ptr].timestamp = (double) tv.tv_usec / 1E6;
 				} else if (cmsg->cmsg_type == SO_RXQ_OVFL)
 					memcpy(&obj->dropcnt, CMSG_DATA(cmsg), sizeof(__u32));
 			}
@@ -672,8 +700,12 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 			/* registering CAN frame in buffer */
 			frame_buffer[buffer_ptr].arbitration_id = (uint32_t) (frame.can_id & CAN_EXTENDED_ID_MASK);
 			frame_buffer[buffer_ptr].len = (uint8_t) frame.len;
-			frame_buffer[buffer_ptr].data = *((uint64_t *) frame.data); /* TODO: convert to little endian ?*/
-			frame_buffer[buffer_ptr].timestamp = (double) (tv.tv_sec * 1E6 + tv.tv_usec) / 1E6;
+			// reverse_endian(&frame.data, &(frame_buffer[buffer_ptr].data), 8);
+			/* TODO: check endianness and call reverse_endian if necessary */
+			memcpy(&(frame_buffer[buffer_ptr].data), &frame.data, (int) frame.len);
+			// frame_buffer[buffer_ptr].timestamp = (double) (tv.tv_sec * 1E6 + tv.tv_usec) / 1E6;
+			frame_buffer[buffer_ptr].timestamp = (double) tv.tv_usec / 1E6;
+			printf("%ld.%ld\n", (long long) tv.tv_sec, tv.tv_usec);
 			buffer_ptr = (buffer_ptr + 1) % FRAME_BUFFER_SIZE;
 
 			if (log) {
@@ -776,7 +808,7 @@ static PyObject *get_frame_from_buffer()
 	}
 	else 
 	{
-		PyObject *frame = Py_BuildValue("(H,c,K,d)", frame_buffer[read_ptr].arbitration_id, frame_buffer[read_ptr].len, frame_buffer[read_ptr].data, frame_buffer[read_ptr].timestamp);
+		PyObject *frame = Py_BuildValue("(H,I,y#,d)", frame_buffer[read_ptr].arbitration_id, frame_buffer[read_ptr].len, frame_buffer[read_ptr].data, frame_buffer[read_ptr].len, frame_buffer[read_ptr].timestamp);
 		read_ptr = (read_ptr + 1) % FRAME_BUFFER_SIZE;
 		return frame;
 	}
