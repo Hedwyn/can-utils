@@ -107,7 +107,7 @@
 #define CAN_EXTENDED_ID_MASK 0x1FFFFFFF
 #define ENABLE_TIMESTAMPING 1
 #define USE_HW_TIMESTAMP 0
-
+#define DEFAULT_TIMEOUT 0.2
 /* ------------------------------------------------------------------------- */
 
 static const char col_on[MAXCOL][19] = { BLUE, RED, GREEN, BOLD, MAGENTA, CYAN };
@@ -192,14 +192,6 @@ static void print_usage(char *prg)
 	fprintf(stderr, "%s vcan2,123:C00007FF\n         (matches CAN ID 123 - only SFF and non-RTR frames)\n", prg);
 	fprintf(stderr, "\n");
 }
-
-static void sigterm(int signo)
-{
-	running = 0;
-	printf("%d frame received \n", frame_ctr);
-	exit(0);
-}
-
 
 /* disabling inlining as both GCC and Clang mess up the inlining, leading the code to fail when called in a Python thread */
 static int __attribute__ ((noinline)) idx2dindex(int ifidx, int socket)
@@ -319,6 +311,18 @@ void reverse_endian(uint8_t *src, uint8_t *dst, const int len)
 		dst[i] = src[len - i - 1];
 }
 
+
+static PyObject *_raise_keyboard_interrupt() {
+
+	PyErr_SetString(PyExc_KeyboardInterrupt, "CTRL + C received\n");
+	return NULL;
+}
+
+static PyObject *_raise_error() {
+
+	PyErr_SetString(PyExc_ValueError, "Generic error for socket problems");
+	return NULL;
+	}
 void init_buffer()
 {
 	int i;
@@ -330,6 +334,20 @@ void init_buffer()
 		memset(&frame_buffer[i].data, 0, sizeof(frame_buffer[i].data));
 		// frame_buffer[i].data[8] = '\0';
 	}
+}
+
+
+void close_sockets(int *fd_epoll, int total_devices, FILE *logfile)
+{
+	for (int i = 0; i < total_devices; i++)
+		close(sock_info[i].s);
+
+	close(*fd_epoll);
+	printf("We are out of the loop!\n");
+
+	if (logfile != NULL)
+		fclose(logfile);
+	_raise_keyboard_interrupt();
 }
 
 int loop(char **argv, int total_devices, char **filters, int total_filters)
@@ -372,6 +390,12 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 	FILE *logfile = NULL;
 	char *logname = NULL;
 
+	/* catching SIGTERM */
+	void sigterm(int signo)
+	{
+		printf("%d frame received \n", frame_ctr);
+		running = 0;
+	}
 	signal(SIGTERM, sigterm);
 	signal(SIGHUP, sigterm);
 	signal(SIGINT, sigterm);
@@ -615,7 +639,7 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 	msg.msg_control = &ctrlmsg;
 
 	while (running) {
-		num_events = epoll_wait(fd_epoll, events_pending, total_devices, timeout_ms);
+		num_events = epoll_wait(fd_epoll, events_pending, total_devices, DEFAULT_TIMEOUT);
 		if (num_events == -1) {
 			if (errno != EINTR)
 				running = 0;
@@ -774,25 +798,7 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 			fflush(stdout);
 		}
 	}
-
-	for (i = 0; i < total_devices; i++)
-		close(sock_info[i].s);
-
-	close(fd_epoll);
-
-	if (log)
-		fclose(logfile);
-
-	return 0;	
-}
-
-
-int main()
-{ 
-	char *devices[1];
-	char *filters[0] = {};
-	devices[0] = "vcan0";
-	loop(devices, 1, filters, 0);
+	close_sockets(&fd_epoll, total_devices, NULL);
 	return 0;
 }
 
@@ -805,6 +811,13 @@ static PyObject *call_loop()
 	printf("Listening on %s\n", devices[0]);
 	loop(devices, 1, filters, 0);
 	Py_END_ALLOW_THREADS
+	Py_RETURN_NONE;
+}
+
+static PyObject *terminate()
+{
+	running = 0;
+	printf("Terminating\n");
 	Py_RETURN_NONE;
 }
 
@@ -825,6 +838,7 @@ static PyObject *get_frame_from_buffer()
 static PyMethodDef FputsMethods[] = {
     {"loop", call_loop, METH_VARARGS, "Python interface for candump C library function"},
     {"recv", get_frame_from_buffer, METH_VARARGS, "Extracts last message from buffer"},
+    {"terminate", get_frame_from_buffer, METH_VARARGS, "Stops the reception loop"},
     {NULL, NULL, 0, NULL}
 };
 
@@ -842,3 +856,11 @@ PyMODINIT_FUNC PyInit_candump(void) {
     return PyModule_Create(&candumpmodule);
 }
 
+int main()
+{ 
+	char *devices[1];
+	char *filters[0] = {};
+	devices[0] = "vcan0";
+	loop(devices, 1, filters, 0);
+	return 0;
+}
