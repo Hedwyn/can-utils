@@ -822,26 +822,7 @@ static PyObject *get_frame_from_buffer()
 	}
 }
 
-static PyObject *method_fputs(PyObject *self, PyObject *args) {
-
-    char *str, *filename;
-    int bytes_copied = -1;
-
-    /* Parse arguments */
-    if(!PyArg_ParseTuple(args, "ss", &str, &filename)) {
-        return NULL;
-    }
-
-
-    FILE *fp = fopen(filename, "w");
-    bytes_copied = fputs(str, fp);
-    fclose(fp);
-    return PyLong_FromLong(bytes_copied);
-}
-
-
 static PyMethodDef FputsMethods[] = {
-    {"fputs", method_fputs, METH_VARARGS, "Python interface for candump C library function"},
     {"loop", call_loop, METH_VARARGS, "Python interface for candump C library function"},
     {"recv", get_frame_from_buffer, METH_VARARGS, "Extracts last message from buffer"},
     {NULL, NULL, 0, NULL}
