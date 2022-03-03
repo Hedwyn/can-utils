@@ -304,6 +304,15 @@ static inline void print_timestamp(const char timestamp, const struct timeval *t
 	printf("%s", buffer);
 }
 
+/* catching SIGTERM */
+void sigterm(int signo)
+{
+	printf("%d frame received \n", frame_ctr);
+	running = 0;
+	_got_keyboard_interrupt = 1;
+	PyErr_SetString(PyExc_KeyboardInterrupt, "CTRL + C received\n");
+}
+
 /*------------------------------------------------------------------*/
 void reverse_endian(uint8_t *src, uint8_t *dst, const int len)
 {
@@ -384,14 +393,6 @@ static PyObject *loop(char **argv, int total_devices, char **filters, int total_
 	FILE *logfile = NULL;
 	char *logname = NULL;
 
-	/* catching SIGTERM */
-	void sigterm(int signo)
-	{
-		printf("%d frame received \n", frame_ctr);
-		running = 0;
-		_got_keyboard_interrupt = 1;
-		PyErr_SetString(PyExc_KeyboardInterrupt, "CTRL + C received\n");
-	}
 	signal(SIGTERM, sigterm);
 	signal(SIGHUP, sigterm);
 	signal(SIGINT, sigterm);
