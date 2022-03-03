@@ -98,7 +98,8 @@
 #define MAGENTA (ATTBOLD FGMAGENTA)
 #define CYAN (ATTBOLD FGCYAN)
 
-#define FRAME_BUFFER_SIZE 256 // WARNING: should be a power of 2
+#define FRAME_BUFFER_SIZE 256 // WARNING: picking a power of 2 is more optimized
+#define CAN_EXTENDED_ID_MASK 0x1FFFFFFF
 
 static const char col_on[MAXCOL][19] = { BLUE, RED, GREEN, BOLD, MAGENTA, CYAN };
 static const char col_off[] = ATTRESET;
@@ -112,7 +113,7 @@ struct if_info { /* bundled information per open socket */
 static struct if_info sock_info[MAXSOCK];
 
 static char devname[MAXIFNAMES][IFNAMSIZ+1];
-static int dindex[MAXIFNAMES];
+static volatile int dindex[MAXIFNAMES];
 static int max_devname_len; /* to prevent frazzled device name output */
 static const int canfd_on = 1;
 
@@ -125,10 +126,12 @@ extern int optind, opterr, optopt;
 static volatile int running = 1;
 static volatile int frame_ctr = 0;
 static int buffer_ptr = 0;
+static int read_ptr = 0;
+
 
 struct canframe
 {
-	long timestamp;
+	double timestamp;
 	uint8_t len; 
 	uint32_t arbitration_id;
 	uint64_t data;
@@ -185,7 +188,9 @@ static void sigterm(int signo)
 {
 	running = 0;
 	printf("%d frame received \n", frame_ctr);
+	exit(0);
 }
+
 
 
 static int idx2dindex(int ifidx, int socket)
@@ -236,6 +241,11 @@ static int idx2dindex(int ifidx, int socket)
 #endif
 
 	return i;
+}
+
+void do_nothing()
+{ 
+	// idx2dindex(0,0);
 }
 
 static inline void sprint_timestamp(const char timestamp, const struct timeval *tv,
@@ -660,10 +670,10 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 			}
 			/* ----------------------------------- */
 			/* registering CAN frame in buffer */
-			frame_buffer[buffer_ptr].arbitration_id = (uint32_t) frame.can_id;
-			frame_buffer[buffer_ptr].len = (uint8_t) frame.can_id;
-			frame_buffer[buffer_ptr].data = (uint64_t) frame.data;
-			frame_buffer[buffer_ptr].timestamp = 0;
+			frame_buffer[buffer_ptr].arbitration_id = (uint32_t) (frame.can_id & CAN_EXTENDED_ID_MASK);
+			frame_buffer[buffer_ptr].len = (uint8_t) frame.len;
+			frame_buffer[buffer_ptr].data = *((uint64_t *) frame.data); /* TODO: convert to little endian ?*/
+			frame_buffer[buffer_ptr].timestamp = (double) (tv.tv_sec * 1E6 + tv.tv_usec) / 1E6;
 			buffer_ptr = (buffer_ptr + 1) % FRAME_BUFFER_SIZE;
 
 			if (log) {
@@ -736,198 +746,6 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 	return 0;	
 }
 
-int get_last_frame(
-	int fd_epoll, 
-	struct iovec *iov, 
-	struct msghdr *msg, 
-	struct sockaddr_can *addr,
-	FILE *logfile,
-	int total_devices)
-{
-	int num_events;
-	int nbytes, i, maxdlen, count = 0;
-	struct epoll_event events_pending[MAXSOCK];
-	struct canfd_frame frame;
-	struct cmsghdr *cmsg;
-	unsigned char timestamp = 0;
-	unsigned char logtimestamp = 'a';
-	unsigned char hwtimestamp = 0;
-	unsigned char down_causes_exit = 1;
-	unsigned char dropmonitor = 0;
-	unsigned char extra_msg_info = 0;
-	unsigned char silent = SILENT_ON;
-	unsigned char silentani = 0;
-	unsigned char color = 0;
-	unsigned char view = 0;
-	unsigned char log = 0;
-	unsigned char logfrmt = 0;
-	char ctrlmsg[CMSG_SPACE(sizeof(struct timeval) + 3 * sizeof(struct timespec) + sizeof(__u32))];
-
-
-	struct timeval tv, last_tv;
-	last_tv.tv_sec = 0;
-	last_tv.tv_usec = 0;
-
-
-	num_events = epoll_wait(fd_epoll, events_pending, total_devices,  0 /* timeout in ms */);
-	if (num_events == -1) {
-		if (errno != EINTR)
-			running = 0;
-		return -1;
-	}
-	frame_ctr += num_events;
-	for (i = 0; i < num_events; i++) {  /* check waiting CAN RAW sockets */
-		struct if_info* obj = events_pending[i].data.ptr;
-		int idx;
-		char *extra_info = "";
-
-		/* these settings may be modified by recvmsg() */
-		iov->iov_len = sizeof(frame);
-		msg->msg_namelen = sizeof(*addr);
-		msg->msg_controllen = sizeof(ctrlmsg);
-		msg->msg_flags = 0;
-
-		nbytes = recvmsg(obj->s, msg, 0);
-		idx = idx2dindex(addr->can_ifindex, obj->s);
-
-		if (nbytes < 0) {
-			if ((errno == ENETDOWN) && !down_causes_exit) {
-				fprintf(stderr, "%s: interface down\n", devname[idx]);
-				// fprintf(stderr, "interface down\n");
-				continue;
-			}
-			perror("read");
-			return 1;
-		}
-
-		if ((size_t)nbytes == CAN_MTU)
-			maxdlen = CAN_MAX_DLEN;
-		else if ((size_t)nbytes == CANFD_MTU)
-			maxdlen = CANFD_MAX_DLEN;
-		else {
-			fprintf(stderr, "read: incomplete CAN frame\n");
-			return 1;
-		}
-
-		if (count && (--count == 0))
-			running = 0;
-
-		for (cmsg = CMSG_FIRSTHDR(msg);
-				cmsg && (cmsg->cmsg_level == SOL_SOCKET);
-				cmsg = CMSG_NXTHDR(msg,cmsg)) {
-			if (cmsg->cmsg_type == SO_TIMESTAMP) {
-				memcpy(&tv, CMSG_DATA(cmsg), sizeof(tv));
-			} else if (cmsg->cmsg_type == SO_TIMESTAMPING) {
-
-				struct timespec *stamp = (struct timespec *)CMSG_DATA(cmsg);
-
-				/*
-					* stamp[0] is the software timestamp
-					* stamp[1] is deprecated
-					* stamp[2] is the raw hardware timestamp
-					* See chapter 2.1.2 Receive timestamps in
-					* linux/Documentation/networking/timestamping.txt
-					*/
-				tv.tv_sec = stamp[2].tv_sec;
-				tv.tv_usec = stamp[2].tv_nsec/1000;
-			} else if (cmsg->cmsg_type == SO_RXQ_OVFL)
-				memcpy(&obj->dropcnt, CMSG_DATA(cmsg), sizeof(__u32));
-		}
-
-		/* check for (unlikely) dropped frames on this specific socket */
-		if (obj->dropcnt != obj->last_dropcnt) {
-
-			__u32 frames = obj->dropcnt - obj->last_dropcnt;
-
-			if (silent != SILENT_ON)
-				printf("DROPCOUNT: dropped %d CAN frame%s on '%s' socket (total drops %d)\n",
-						frames, (frames > 1)?"s":"", devname[idx], obj->dropcnt);
-
-			if (log)
-				fprintf(logfile, "DROPCOUNT: dropped %d CAN frame%s on '%s' socket (total drops %d)\n",
-					frames, (frames > 1)?"s":"", devname[idx], obj->dropcnt);
-
-			obj->last_dropcnt = obj->dropcnt;
-		}
-
-		/* once we detected a EFF frame indent SFF frames accordingly */
-		if (frame.can_id & CAN_EFF_FLAG)
-			view |= CANLIB_VIEW_INDENT_SFF;
-
-		if (extra_msg_info) {
-			if (msg->msg_flags & MSG_DONTROUTE)
-				extra_info = " T";
-			else
-				extra_info = " R";
-		}
-		/* ----------------------------------- */
-		/* registering CAN frame in buffer */
-		frame_buffer[buffer_ptr].arbitration_id = (uint32_t) frame.can_id;
-		frame_buffer[buffer_ptr].len = (uint8_t) frame.can_id;
-		frame_buffer[buffer_ptr].data = (uint64_t) frame.data;
-		frame_buffer[buffer_ptr].timestamp = 0;
-		buffer_ptr = (buffer_ptr + 1) % FRAME_BUFFER_SIZE;
-
-		if (log) {
-			char buf[CL_CFSZ]; /* max length */
-			char ts_buf[TIMESTAMPSZ];
-
-			sprint_timestamp(logtimestamp, &tv, &last_tv, ts_buf);
-
-			/* log CAN frame with absolute timestamp & device */
-			sprint_canframe(buf, &frame, 0, maxdlen);
-			fprintf(logfile, "%s%*s %s%s\n", ts_buf,
-				max_devname_len, devname[idx], buf,
-				extra_info);
-		}
-
-		if ((logfrmt) && (silent == SILENT_OFF)){
-			char buf[CL_CFSZ]; /* max length */
-
-			/* print CAN frame in log file style to stdout */
-			sprint_canframe(buf, &frame, 0, maxdlen);
-			print_timestamp(logtimestamp, &tv, &last_tv);
-
-			printf("%*s %s%s\n",
-				max_devname_len, devname[idx], buf,
-				extra_info);
-			goto out_fflush; /* no other output to stdout */
-		}
-
-		if (silent != SILENT_OFF){
-			if (silent == SILENT_ANI) {
-				printf("%c\b", anichar[silentani %= MAXANI]);
-				silentani++;
-			}
-			goto out_fflush; /* no other output to stdout */
-		}
-
-		printf(" %s", (color > 2) ? col_on[idx % MAXCOL] : "");
-		print_timestamp(timestamp, &tv, &last_tv);
-		printf(" %s", (color && (color < 3)) ? col_on[idx % MAXCOL] : "");
-		printf("%*s", max_devname_len, devname[idx]);
-
-		if (extra_msg_info) {
-
-			if (msg->msg_flags & MSG_DONTROUTE)
-				printf ("  TX %s", extra_m_info[frame.flags & 3]);
-			else
-				printf ("  RX %s", extra_m_info[frame.flags & 3]);
-		}
-
-		printf("%s  ", (color == 1) ? col_off : "");
-
-		fprint_long_canframe(stdout, &frame, NULL, view, maxdlen);
-
-		printf("%s", (color > 1) ? col_off : "");
-		printf("\n");
-
-out_fflush:
-		fflush(stdout);
-	}
-
-	return 0;
-}
 
 int main()
 { 
@@ -942,23 +760,26 @@ static PyObject *call_loop()
 { 
 	char *devices[1];
 	char *filters[0] = {};
+	Py_BEGIN_ALLOW_THREADS;
 	devices[0] = "vcan0";
 	printf("%s\n", devices[0]);
 	loop(devices, 1, filters, 0);
+	Py_END_ALLOW_THREADS
 	Py_RETURN_NONE;
 }
 
 static PyObject *get_frame_from_buffer()
 {
-	PyObject *frame = Py_BuildValue("(h,c,l,l)", frame_buffer[buffer_ptr].arbitration_id, frame_buffer[buffer_ptr].len, frame_buffer[buffer_ptr].data, frame_buffer[buffer_ptr].timestamp);
-	buffer_ptr--;
-	return frame;
-	// for (int i =0; i < buffer_ptr; i++)
-	// {
-	// 	PyObject *frame = Py_BuildValue("(i,i,i,i)", frame_buffer[i].arbitration_id, frame_buffer[i].len, frame_buffer[i].data, frame_buffer[i].timestamp);
-	// 	return frame;
-	// }
-	// Py_RETURN_NONE;
+	if (read_ptr == buffer_ptr)
+	{
+		Py_RETURN_NONE;
+	}
+	else 
+	{
+		PyObject *frame = Py_BuildValue("(H,c,K,d)", frame_buffer[read_ptr].arbitration_id, frame_buffer[read_ptr].len, frame_buffer[read_ptr].data, frame_buffer[read_ptr].timestamp);
+		read_ptr = (read_ptr + 1) % FRAME_BUFFER_SIZE;
+		return frame;
+	}
 }
 
 static PyObject *method_fputs(PyObject *self, PyObject *args) {
@@ -995,8 +816,8 @@ static struct PyModuleDef candumpmodule = {
     FputsMethods
 };
 
-// /* comment to compile with gcc */
-// PyMODINIT_FUNC PyInit_candump(void) {
-//     return PyModule_Create(&candumpmodule);
-// }
+/* comment to compile with gcc */
+PyMODINIT_FUNC PyInit_candump(void) {
+    return PyModule_Create(&candumpmodule);
+}
 
