@@ -109,6 +109,7 @@
 #define USE_HW_TIMESTAMP 0
 #define DEFAULT_TIMEOUT 0.2
 /* ------------------------------------------------------------------------- */
+char _got_keyboard_interrupt = 0;
 
 static const char col_on[MAXCOL][19] = { BLUE, RED, GREEN, BOLD, MAGENTA, CYAN };
 static const char col_off[] = ATTRESET;
@@ -312,17 +313,7 @@ void reverse_endian(uint8_t *src, uint8_t *dst, const int len)
 }
 
 
-static PyObject *_raise_keyboard_interrupt() {
 
-	PyErr_SetString(PyExc_KeyboardInterrupt, "CTRL + C received\n");
-	return NULL;
-}
-
-static PyObject *_raise_error() {
-
-	PyErr_SetString(PyExc_ValueError, "Generic error for socket problems");
-	return NULL;
-	}
 void init_buffer()
 {
 	int i;
@@ -332,10 +323,14 @@ void init_buffer()
 		frame_buffer[i].len = 0;
 		frame_buffer[i].arbitration_id = 0;
 		memset(&frame_buffer[i].data, 0, sizeof(frame_buffer[i].data));
-		// frame_buffer[i].data[8] = '\0';
 	}
 }
 
+PyObject *_raise_system_error()
+{
+	PyErr_SetString(PyExc_SystemError, "System error");
+	return NULL;
+}
 
 void close_sockets(int *fd_epoll, int total_devices, FILE *logfile)
 {
@@ -347,10 +342,9 @@ void close_sockets(int *fd_epoll, int total_devices, FILE *logfile)
 
 	if (logfile != NULL)
 		fclose(logfile);
-	_raise_keyboard_interrupt();
 }
 
-int loop(char **argv, int total_devices, char **filters, int total_filters)
+static PyObject *loop(char **argv, int total_devices, char **filters, int total_filters)
 {
 	int fd_epoll;
 	struct epoll_event events_pending[MAXSOCK];
@@ -395,6 +389,8 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 	{
 		printf("%d frame received \n", frame_ctr);
 		running = 0;
+		_got_keyboard_interrupt = 1;
+		PyErr_SetString(PyExc_KeyboardInterrupt, "CTRL + C received\n");
 	}
 	signal(SIGTERM, sigterm);
 	signal(SIGHUP, sigterm);
@@ -409,13 +405,13 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 
 	if (total_devices > MAXSOCK) {
 		fprintf(stderr, "More than %d CAN devices given on commandline!\n", MAXSOCK);
-		return 1;
+		return (_raise_system_error());
 	}
 
 	fd_epoll = epoll_create(1);
 	if (fd_epoll < 0) {
 		perror("epoll_create");
-		return 1;
+		return (_raise_system_error());
 	}
 
 	for (i = 0; i < total_devices; i++) {
@@ -426,13 +422,13 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 		obj->s = socket(PF_CAN, SOCK_RAW, CAN_RAW);
 		if (obj->s < 0) {
 			perror("socket");
-			return 1;
+			return (_raise_system_error());
 		}
 
 		event_setup.data.ptr = obj; /* remember the instance as private data */
 		if (epoll_ctl(fd_epoll, EPOLL_CTL_ADD, obj->s, &event_setup)) {
 			perror("failed to add socket to epoll");
-			return 1;
+			return (_raise_system_error());
 		}
 
 		obj->cmdlinename = ptr; /* save pointer to cmdline name of this socket */
@@ -444,7 +440,7 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 
 		if (nbytes >= IFNAMSIZ) {
 			fprintf(stderr, "name of CAN device '%s' is too long!\n", ptr);
-			return 1;
+			return (_raise_system_error());
 		}
 
 		if (nbytes > max_devname_len)
@@ -469,7 +465,7 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 			rfilter = malloc(sizeof(struct can_filter) * total_filters);
 			if (!rfilter) {
 				fprintf(stderr, "Failed to create filter space!\n");
-				return 1;
+				return (_raise_system_error());
 			}
 
 			err_mask = 0;
@@ -497,7 +493,7 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 					join_filter = 1;
 				} else if (sscanf(ptr, "#%x", &err_mask) != 1) {
 					fprintf(stderr, "Error in filter option parsing: '%s'\n", ptr);
-					return 1;
+					return (_raise_system_error());
 				}
 			}
 
@@ -508,7 +504,7 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 			if (join_filter && setsockopt(obj->s, SOL_CAN_RAW, CAN_RAW_JOIN_FILTERS,
 						      &join_filter, sizeof(join_filter)) < 0) {
 				perror("setsockopt CAN_RAW_JOIN_FILTERS not supported by your Linux Kernel");
-				return 1;
+				return (_raise_system_error());
 			}
 
 			if (numfilter)
@@ -535,13 +531,13 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 				if (setsockopt(obj->s, SOL_SOCKET, SO_RCVBUF,
 					       &rcvbuf_size, sizeof(rcvbuf_size)) < 0) {
 					perror("setsockopt SO_RCVBUF");
-					return 1;
+					return (_raise_system_error());
 				}
 
 				if (getsockopt(obj->s, SOL_SOCKET, SO_RCVBUF,
 					       &curr_rcvbuf_size, &curr_rcvbuf_size_len) < 0) {
 					perror("getsockopt SO_RCVBUF");
-					return 1;
+					return (_raise_system_error());
 				}
 
 				/* Only print a warning the first time we detect the adjustment */
@@ -564,7 +560,7 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 				if (setsockopt(obj->s, SOL_SOCKET, SO_TIMESTAMPING,
 					       &timestamping_flags, sizeof(timestamping_flags)) < 0) {
 					perror("setsockopt SO_TIMESTAMPING is not supported by your Linux kernel");
-					return 1;
+					return (_raise_system_error());
 				}
 			} else {
 				const int timestamp_on = 1;
@@ -572,7 +568,7 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 				if (setsockopt(obj->s, SOL_SOCKET, SO_TIMESTAMP,
 					       &timestamp_on, sizeof(timestamp_on)) < 0) {
 					perror("setsockopt SO_TIMESTAMP");
-					return 1;
+					return (_raise_system_error());
 				}
 			}
 		}
@@ -585,13 +581,13 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 			if (setsockopt(obj->s, SOL_SOCKET, SO_RXQ_OVFL,
 				       &dropmonitor_on, sizeof(dropmonitor_on)) < 0) {
 				perror("setsockopt SO_RXQ_OVFL not supported by your Linux Kernel");
-				return 1;
+				return (_raise_system_error());
 			}
 		}
 
 		if (bind(obj->s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 			perror("bind");
-			return 1;
+			return (_raise_system_error());
 		}
 	}
 
@@ -603,7 +599,7 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 
 			if (time(&currtime) == (time_t)-1) {
 				perror("time");
-				return 1;
+				return (_raise_system_error());
 			}
 
 			localtime_r(&currtime, &now);
@@ -627,7 +623,7 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 		logfile = fopen(logname, "w");
 		if (!logfile) {
 			perror("logfile");
-			return 1;
+			return (_raise_system_error());
 		}
 	}
 
@@ -666,7 +662,7 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 					continue;
 				}
 				perror("read");
-				return 1;
+				return (_raise_system_error());
 			}
 
 			if ((size_t)nbytes == CAN_MTU)
@@ -675,7 +671,7 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 				maxdlen = CANFD_MAX_DLEN;
 			else {
 				fprintf(stderr, "read: incomplete CAN frame\n");
-				return 1;
+				return (_raise_system_error());
 			}
 
 			if (count && (--count == 0))
@@ -799,7 +795,7 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 		}
 	}
 	close_sockets(&fd_epoll, total_devices, NULL);
-	return 0;
+	Py_RETURN_NONE;
 }
 
 static PyObject *call_loop()
@@ -810,7 +806,14 @@ static PyObject *call_loop()
 	devices[0] = "vcan0";
 	printf("Listening on %s\n", devices[0]);
 	loop(devices, 1, filters, 0);
-	Py_END_ALLOW_THREADS
+	printf("loop ended\n");
+	Py_END_ALLOW_THREADS;
+
+	if (_got_keyboard_interrupt)
+	{
+
+		return NULL;
+	}
 	Py_RETURN_NONE;
 }
 
