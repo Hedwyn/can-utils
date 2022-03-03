@@ -102,8 +102,13 @@
 #define MAGENTA (ATTBOLD FGMAGENTA)
 #define CYAN (ATTBOLD FGCYAN)
 
+/* ------------------------------------------------------------------------- */
 #define FRAME_BUFFER_SIZE 256 // WARNING: picking a power of 2 is more optimized
 #define CAN_EXTENDED_ID_MASK 0x1FFFFFFF
+#define ENABLE_TIMESTAMPING 1
+#define USE_HW_TIMESTAMP 0
+
+/* ------------------------------------------------------------------------- */
 
 static const char col_on[MAXCOL][19] = { BLUE, RED, GREEN, BOLD, MAGENTA, CYAN };
 static const char col_off[] = ATTRESET;
@@ -334,9 +339,9 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 	struct epoll_event event_setup = {
 		.events = EPOLLIN, /* prepare the common part */
 	};
-	unsigned char timestamp = 0;
+	unsigned char timestamp = ENABLE_TIMESTAMPING;
 	unsigned char logtimestamp = 'a';
-	unsigned char hwtimestamp = 0;
+	unsigned char hwtimestamp = USE_HW_TIMESTAMP;
 	unsigned char down_causes_exit = 1;
 	unsigned char dropmonitor = 0;
 	unsigned char extra_msg_info = 0;
@@ -523,6 +528,9 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 			}
 		}
 
+		/* ----------------- 
+		 *  timestmaping is enabled here
+		 * ----------------- */
 		if (timestamp || log || logfrmt) {
 			if (hwtimestamp) {
 				const int timestamping_flags = (SOF_TIMESTAMPING_SOFTWARE |
@@ -544,6 +552,8 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 				}
 			}
 		}
+		/* ----------------------- */
+
 
 		if (dropmonitor) {
 			const int dropmonitor_on = 1;
@@ -646,7 +656,6 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 
 			if (count && (--count == 0))
 				running = 0;
-
 			for (cmsg = CMSG_FIRSTHDR(&msg);
 			     cmsg && (cmsg->cmsg_level == SOL_SOCKET);
 			     cmsg = CMSG_NXTHDR(&msg,cmsg)) {
@@ -703,9 +712,8 @@ int loop(char **argv, int total_devices, char **filters, int total_filters)
 			// reverse_endian(&frame.data, &(frame_buffer[buffer_ptr].data), 8);
 			/* TODO: check endianness and call reverse_endian if necessary */
 			memcpy(&(frame_buffer[buffer_ptr].data), &frame.data, (int) frame.len);
-			// frame_buffer[buffer_ptr].timestamp = (double) (tv.tv_sec * 1E6 + tv.tv_usec) / 1E6;
-			frame_buffer[buffer_ptr].timestamp = (double) tv.tv_usec / 1E6;
-			printf("%ld.%ld\n", (long long) tv.tv_sec, tv.tv_usec);
+			/* getting ts */
+			frame_buffer[buffer_ptr].timestamp = (double) tv.tv_sec + (double) tv.tv_usec / 1E6;
 			buffer_ptr = (buffer_ptr + 1) % FRAME_BUFFER_SIZE;
 
 			if (log) {
@@ -794,7 +802,7 @@ static PyObject *call_loop()
 	char *filters[0] = {};
 	Py_BEGIN_ALLOW_THREADS;
 	devices[0] = "vcan0";
-	printf("%s\n", devices[0]);
+	printf("Listening on %s\n", devices[0]);
 	loop(devices, 1, filters, 0);
 	Py_END_ALLOW_THREADS
 	Py_RETURN_NONE;
