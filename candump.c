@@ -108,6 +108,8 @@
 #define ENABLE_TIMESTAMPING 1
 #define USE_HW_TIMESTAMP 0
 #define DEFAULT_TIMEOUT 0.2
+#define DEVICE_NAME_MAX_LENGTH 20
+#define MAX_DEVICES 5
 /* ------------------------------------------------------------------------- */
 char _got_keyboard_interrupt = 0;
 
@@ -403,6 +405,7 @@ static PyObject *loop(char **argv, int total_devices, char **filters, int total_
 	last_tv.tv_usec = 0;
 
 
+	Py_BEGIN_ALLOW_THREADS;
 
 	if (total_devices > MAXSOCK) {
 		fprintf(stderr, "More than %d CAN devices given on commandline!\n", MAXSOCK);
@@ -416,9 +419,11 @@ static PyObject *loop(char **argv, int total_devices, char **filters, int total_
 	}
 
 	for (i = 0; i < total_devices; i++) {
+
 		struct if_info* obj = &sock_info[i];
 		ptr = argv[i];
 		nptr = strchr(ptr, ',');
+		printf("CAN device name: %s\n", ptr);
 
 		obj->s = socket(PF_CAN, SOCK_RAW, CAN_RAW);
 		if (obj->s < 0) {
@@ -433,7 +438,6 @@ static PyObject *loop(char **argv, int total_devices, char **filters, int total_
 		}
 
 		obj->cmdlinename = ptr; /* save pointer to cmdline name of this socket */
-
 		if (nptr)
 			nbytes = nptr - ptr;  /* interface name is up the first ',' */
 		else
@@ -473,7 +477,7 @@ static PyObject *loop(char **argv, int total_devices, char **filters, int total_
 			join_filter = 0;
 			numfilter = 0;
 			for (int i =0; i < total_filters; i++) {
-
+				/* TODO: pass filters to Python entrypoint */
 				ptr = filters[i]; 
 				if (sscanf(ptr, "%x:%x",
 					   &rfilter[numfilter].can_id,
@@ -796,20 +800,40 @@ static PyObject *loop(char **argv, int total_devices, char **filters, int total_
 		}
 	}
 	close_sockets(&fd_epoll, total_devices, NULL);
+	Py_END_ALLOW_THREADS;
 	Py_RETURN_NONE;
 }
 
-static PyObject *call_loop()
-{ 
-	char *devices[1];
-	char *filters[0] = {};
-	Py_BEGIN_ALLOW_THREADS;
-	devices[0] = "vcan0";
-	printf("Listening on %s\n", devices[0]);
-	loop(devices, 1, filters, 0);
-	printf("loop ended\n");
-	Py_END_ALLOW_THREADS;
+void* extract_string_sequence(char **container, PyObject *seq, int len)
+{
+    for(int i=0; i < len; i++) {
+        PyObject *item = PySequence_Fast_GET_ITEM(seq, i);
+        if(!item) {
+            Py_DECREF(seq);
+            return NULL;
+        }
+		container[i] = PyUnicode_AsUTF8(item);
+    } 
+	return container;
+}
 
+static PyObject *call_loop(PyObject *self, PyObject *args)
+{ 
+	
+	PyObject *arg_devices;
+	PyObject *arg_filters;
+	char **filters, **devices;
+	int total_devices, total_filters;
+	if(!PyArg_ParseTuple(args, "OO", &arg_devices, &arg_filters))
+		return(_raise_system_error());
+	total_devices = PyList_Size(arg_devices);
+	total_filters = PyList_Size(arg_filters);
+	devices = malloc(sizeof(char *) * total_devices);
+	filters = malloc(sizeof(char *) * total_filters);
+	extract_string_sequence(devices, arg_devices, total_devices);
+	extract_string_sequence(filters, arg_filters, total_filters);
+	printf("%s\n", devices[0]);
+	loop(devices, 1, filters, 0);
 	if (_got_keyboard_interrupt)
 	{
 
