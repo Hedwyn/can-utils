@@ -110,6 +110,8 @@
 #define DEFAULT_TIMEOUT 0.2
 #define DEVICE_NAME_MAX_LENGTH 20
 #define MAX_DEVICES 5
+#define PY_DEBUG 0 /* enable to get debug prints */
+#define dprintf(...) if (PY_DEBUG) fprintf(stderr, __VA_ARGS__)
 /* ------------------------------------------------------------------------- */
 char _got_keyboard_interrupt = 0;
 
@@ -349,7 +351,7 @@ void close_sockets(int *fd_epoll, int total_devices, FILE *logfile)
 		close(sock_info[i].s);
 
 	close(*fd_epoll);
-	printf("We are out of the loop!\n");
+	dprintf("Socket closed, leaving the loop!\n");
 
 	if (logfile != NULL)
 		fclose(logfile);
@@ -423,7 +425,6 @@ static PyObject *loop(char **argv, int total_devices, char **filters, int total_
 		struct if_info* obj = &sock_info[i];
 		ptr = argv[i];
 		nptr = strchr(ptr, ',');
-		printf("CAN device name: %s\n", ptr);
 
 		obj->s = socket(PF_CAN, SOCK_RAW, CAN_RAW);
 		if (obj->s < 0) {
@@ -479,6 +480,7 @@ static PyObject *loop(char **argv, int total_devices, char **filters, int total_
 			for (int i =0; i < total_filters; i++) {
 				/* TODO: pass filters to Python entrypoint */
 				ptr = filters[i]; 
+				dprintf("Got filter: %s\n", ptr);
 				if (sscanf(ptr, "%x:%x",
 					   &rfilter[numfilter].can_id,
 					   &rfilter[numfilter].can_mask) == 2) {
@@ -832,8 +834,11 @@ static PyObject *call_loop(PyObject *self, PyObject *args)
 	filters = malloc(sizeof(char *) * total_filters);
 	extract_string_sequence(devices, arg_devices, total_devices);
 	extract_string_sequence(filters, arg_filters, total_filters);
-	printf("%s\n", devices[0]);
-	loop(devices, 1, filters, 0);
+	for (int i = 0; i < total_devices; i++)
+	{
+		dprintf("Listening to %s\n", devices[i]);
+	}
+	loop(devices, total_devices, filters, total_filters);
 	if (_got_keyboard_interrupt)
 	{
 
@@ -845,7 +850,7 @@ static PyObject *call_loop(PyObject *self, PyObject *args)
 static PyObject *terminate()
 {
 	running = 0;
-	printf("Terminating\n");
+	dprintf("Terminating\n");
 	Py_RETURN_NONE;
 }
 
